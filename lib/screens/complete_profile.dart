@@ -1,14 +1,11 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:dotted_border/dotted_border.dart';
-import 'package:iub_ride_sharing_app/screens/Home.dart';
-import 'package:iub_ride_sharing_app/screens/find_a_ride.dart';
-import '../constants/app_colors.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:iub_ride_sharing_app/constants/app_colors.dart';
+import 'package:iub_ride_sharing_app/services/image_upload_service.dart';
+import 'package:iub_ride_sharing_app/screens/Home.dart';
 
 class CompleteProfile extends StatefulWidget {
   const CompleteProfile({super.key});
@@ -20,10 +17,18 @@ class CompleteProfile extends StatefulWidget {
 class _CompleteProfileState extends State<CompleteProfile> {
   String? selectedGender;
   XFile? selectedImage;
+  String? existingPhotoURL;
   final _nameController = TextEditingController();
   final _departmentController = TextEditingController();
   final _defaultRouteController = TextEditingController();
   bool isLoading = false;
+  bool isInitialLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExistingProfile();
+  }
 
   @override
   void dispose() {
@@ -33,31 +38,58 @@ class _CompleteProfileState extends State<CompleteProfile> {
     super.dispose();
   }
 
+  Future<void> _loadExistingProfile() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      if (mounted) setState(() => isInitialLoading = false);
+      return;
+    }
+
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+
+      if (doc.exists) {
+        final data = doc.data();
+        if (data != null && mounted) {
+          _nameController.text = data['fullName'] ?? user.displayName ?? '';
+          _departmentController.text = data['department'] ?? '';
+          _defaultRouteController.text = data['defaultRoute'] ?? '';
+          selectedGender = data['gender'];
+          final rawPhoto = data['photoURL']?.toString();
+          existingPhotoURL = ImageUploadService.isDummyUrl(rawPhoto) ? null : rawPhoto;
+        }
+      } else {
+        _nameController.text = user.displayName ?? '';
+      }
+    } catch (e) {
+      debugPrint("Error preloading profile: $e");
+    } finally {
+      if (mounted) {
+        setState(() => isInitialLoading = false);
+      }
+    }
+  }
+
   Future<void> _pickImage(ImageSource source) async {
     try {
       final ImagePicker picker = ImagePicker();
-
       final XFile? image = await picker.pickImage(
         source: source,
         imageQuality: 80,
       );
-      if (image == null) {
-        print("No image selected");
-        return;
-      }
-
-      print("Image selected: ${image.path}");
+      if (image == null) return;
 
       setState(() {
         selectedImage = image;
       });
     } catch (e) {
-      print("Image picker error: $e");
-
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text("Image error: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Image picker error: $e")),
+        );
       }
     }
   }
@@ -65,22 +97,24 @@ class _CompleteProfileState extends State<CompleteProfile> {
   void _showImagePicker() {
     showModalBottomSheet(
       context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
       builder: (context) {
         return SafeArea(
           child: Wrap(
             children: [
               ListTile(
                 leading: const Icon(Icons.camera_alt),
-                title: const Text("Camera"),
+                title: const Text("Take Photo (Camera)"),
                 onTap: () {
                   Navigator.pop(context);
                   _pickImage(ImageSource.camera);
                 },
               ),
-
               ListTile(
                 leading: const Icon(Icons.photo_library),
-                title: const Text("Gallery"),
+                title: const Text("Choose from Gallery"),
                 onTap: () {
                   Navigator.pop(context);
                   _pickImage(ImageSource.gallery);
@@ -103,7 +137,7 @@ class _CompleteProfileState extends State<CompleteProfile> {
         defaultRoute.isEmpty ||
         selectedGender == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please fill all the fields")),
+        const SnackBar(content: Text("Please fill all fields and select gender")),
       );
       return;
     }
@@ -114,44 +148,67 @@ class _CompleteProfileState extends State<CompleteProfile> {
 
     try {
       final user = FirebaseAuth.instance.currentUser;
-
       if (user == null) {
         throw Exception("No user is currently signed in");
       }
-      // final storageRef = FirebaseStorage.instance
-      //     .ref()
-      //     .child('profile_images')
-      //     .child('${user.uid}.jpg');
-      // if (selectedImage != null) {
-      //   final file = File(selectedImage!.path);
-      //
-      //   await storageRef.putFile(file);
-      // }
 
-      await FirebaseFirestore.instance
-          .collection("users")
-          .doc(user.uid)
-          .update({
-            'fullName': name,
-            'department': department,
-            'gender': selectedGender,
-            'defaultRoute': defaultRoute,
-          });
+      String? uploadedPhotoURL = existingPhotoURL;
+
+      // 1. Upload Profile Photo to Firebase Storage / Base64 fallback
+      if (selectedImage != null) {
+        try {
+          uploadedPhotoURL = await ImageUploadService.uploadImage(
+            file: selectedImage!,
+            storagePath: 'profile_images/${user.uid}.jpg',
+          );
+
+          if (!uploadedPhotoURL.startsWith('data:')) {
+            await user.updatePhotoURL(uploadedPhotoURL);
+          }
+        } catch (storageError) {
+          debugPrint("Profile image upload warning: $storageError");
+        }
+      }
+
+      // 2. Update Firestore User Document
+      await FirebaseFirestore.instance.collection("users").doc(user.uid).set({
+        'uid': user.uid,
+        'fullName': name,
+        'email': user.email ?? '',
+        'department': department,
+        'gender': selectedGender,
+        'defaultRoute': defaultRoute,
+        'photoURL': uploadedPhotoURL ?? '',
+        'isProfileComplete': true,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      if (user.displayName != name) {
+        await user.updateDisplayName(name);
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Profile saved successfully!")),
+          const SnackBar(
+            content: Text("Profile saved successfully!"),
+            backgroundColor: Colors.green,
+          ),
         );
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => Home()),
-        );
+
+        if (Navigator.canPop(context)) {
+          Navigator.pop(context);
+        } else {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const Home()),
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text("Error: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error saving profile: $e")),
+        );
       }
     } finally {
       if (mounted) {
@@ -164,314 +221,298 @@ class _CompleteProfileState extends State<CompleteProfile> {
 
   @override
   Widget build(BuildContext context) {
+    if (isInitialLoading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: Navigator.canPop(context)
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back_ios_new, color: Colors.black),
+                onPressed: () => Navigator.pop(context),
+              )
+            : null,
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
-          child: Padding(
-            padding: EdgeInsetsGeometry.fromLTRB(20, 50, 20, 50),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  "Complete your profile",
-                  style: TextStyle(
-                    fontSize: 26,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.darkBlue,
-                  ),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "Complete your profile",
+                style: TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.darkNavy,
                 ),
-                SizedBox(height: 16),
-                Text(
-                  "Help other students recognize and trust you",
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w400,
-                    color: AppColors.mutedGray,
-                  ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                "Helps other students recognize and trust you on campus",
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey.shade600,
                 ),
-                SizedBox(height: 16),
-                Center(
-                  child: GestureDetector(
-                    onTap: _showImagePicker,
-                    child: DottedBorder(
-                      color: Colors.grey.shade300,
-                      strokeWidth: 1.5,
-                      dashPattern: const [6, 4],
-                      borderType: BorderType.Circle,
-                      child: Container(
-                        width: 100,
-                        height: 100,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white,
-                          border: Border.all(
-                            color: Colors.grey.shade300,
-                            width: 1.5,
-                          ),
-                        ),
-                        child: selectedImage == null
-                            ? Icon(
-                                Icons.camera_alt_outlined,
-                                color: Colors.grey.shade400,
-                                size: 32,
-                              )
-                            : ClipOval(
-                                child: Image.file(
-                                  File(selectedImage!.path),
-                                  width: 100,
-                                  height: 100,
-                                  fit: BoxFit.cover,
-                                ),
+              ),
+              const SizedBox(height: 24),
+
+              // AVATAR PICKER
+              Center(
+                child: GestureDetector(
+                  onTap: _showImagePicker,
+                  child: DottedBorder(
+                    color: Colors.grey.shade400,
+                    strokeWidth: 1.5,
+                    dashPattern: const [6, 4],
+                    borderType: BorderType.Circle,
+                    child: Container(
+                      width: 100,
+                      height: 100,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.grey.shade50,
+                      ),
+                      child: (selectedImage != null || (existingPhotoURL != null && !ImageUploadService.isDummyUrl(existingPhotoURL)))
+                          ? ClipOval(
+                              child: ImageUploadService.buildImageWidget(
+                                localXFile: selectedImage,
+                                imageSource: existingPhotoURL,
+                                width: 100,
+                                height: 100,
+                                fit: BoxFit.cover,
                               ),
-                      ),
+                            )
+                          : Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.camera_alt_outlined,
+                                  color: Colors.grey.shade500,
+                                  size: 32,
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  "Photo",
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.grey.shade600,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
                     ),
                   ),
                 ),
-                SizedBox(height: 16),
-                Container(
-                  width: double.infinity,
-                  padding: EdgeInsetsGeometry.symmetric(
-                    vertical: 14,
-                    horizontal: 16,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade300),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "FULL NAME",
-                        style: TextStyle(
-                          color: Colors.grey.shade400,
-                          fontSize: 12,
-                        ),
-                      ),
-                      TextField(
-                        controller: _nameController,
-                        textAlign: TextAlign.start,
-                        keyboardType: TextInputType.text,
-                        decoration: InputDecoration(
-                          prefixIcon: Icon(Icons.person),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(
-                              color: Colors.grey,
-                              width: 1.5,
-                            ),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(
-                              color: Colors.grey,
-                              width: 1.5,
-                            ),
-                          ),
-                          hintText: "Enter your name",
-                        ),
-                      ),
-                    ],
-                  ),
+              ),
+              const SizedBox(height: 24),
+
+              // FULL NAME INPUT
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade300),
                 ),
-                SizedBox(height: 16),
-                Container(
-                  width: double.infinity,
-                  padding: EdgeInsetsGeometry.symmetric(
-                    vertical: 14,
-                    horizontal: 16,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade300),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "DEPARTMENT",
-                        style: TextStyle(
-                          color: Colors.grey.shade400,
-                          fontSize: 12,
-                        ),
-                      ),
-                      TextField(
-                        controller: _departmentController,
-                        textAlign: TextAlign.start,
-                        keyboardType: TextInputType.text,
-                        decoration: InputDecoration(
-                          prefixIcon: Icon(Icons.home_work_outlined),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(
-                              color: Colors.grey,
-                              width: 1.5,
-                            ),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(
-                              color: Colors.grey,
-                              width: 1.5,
-                            ),
-                          ),
-                          hintText: "Enter your department name",
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                SizedBox(height: 16),
-                Text(
-                  "Gender",
-                  style: TextStyle(color: Colors.grey.shade400, fontSize: 15),
-                ),
-                Row(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => setState(() {
-                          selectedGender = "Male";
-                        }),
-                        child: Container(
-                          alignment: Alignment.center,
-                          height: 50,
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 14,
-                            horizontal: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: selectedGender == "Male"
-                                ? Colors.green
-                                : Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: selectedGender == "Male"
-                                  ? Colors.green
-                                  : Colors.grey,
-                            ),
-                          ),
-                          child: Text(
-                            "Male",
-                            style: TextStyle(
-                              color: selectedGender == "Male"
-                                  ? Colors.white
-                                  : Colors.black,
-                            ),
-                          ),
-                        ),
+                    Text(
+                      "FULL NAME",
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => setState(() {
-                          selectedGender = "Female";
-                        }),
-                        child: Container(
-                          alignment: Alignment.center,
-                          height: 50,
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 14,
-                            horizontal: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: selectedGender == "Female"
-                                ? Colors.green
-                                : Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: selectedGender == "Female"
-                                  ? Colors.green
-                                  : Colors.grey,
-                              style: BorderStyle.solid,
-                            ),
-                          ),
-                          child: Text(
-                            "Female",
-                            style: TextStyle(
-                              color: selectedGender == "Female"
-                                  ? Colors.white
-                                  : Colors.black,
-                            ),
-                          ),
-                        ),
+                    TextField(
+                      controller: _nameController,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.person_outline),
+                        border: InputBorder.none,
+                        hintText: "Enter full name",
+                        isDense: true,
                       ),
                     ),
                   ],
                 ),
-                SizedBox(height: 16),
-                Container(
-                  width: double.infinity,
-                  padding: EdgeInsetsGeometry.symmetric(
-                    vertical: 14,
-                    horizontal: 16,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade300),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "DEFAULT ROUTE",
-                        style: TextStyle(
-                          color: Colors.grey.shade400,
-                          fontSize: 12,
+              ),
+              const SizedBox(height: 14),
+
+              // DEPARTMENT INPUT
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "DEPARTMENT",
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    TextField(
+                      controller: _departmentController,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.school_outlined),
+                        border: InputBorder.none,
+                        hintText: "e.g. BS Information Technology",
+                        isDense: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+
+              // GENDER SELECTION
+              Text(
+                "GENDER",
+                style: TextStyle(
+                  color: Colors.grey.shade600,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() => selectedGender = "Male"),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: selectedGender == "Male"
+                              ? AppColors.mintWhisper
+                              : Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: selectedGender == "Male"
+                                ? AppColors.emeraldGreen
+                                : Colors.grey.shade300,
+                            width: selectedGender == "Male" ? 2 : 1,
+                          ),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          "Male",
+                          style: TextStyle(
+                            color: selectedGender == "Male"
+                                ? Colors.green.shade800
+                                : Colors.black87,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
-                      TextField(
-                        controller: _defaultRouteController,
-                        textAlign: TextAlign.start,
-                        keyboardType: TextInputType.text,
-                        decoration: InputDecoration(
-                          prefixIcon: Icon(Icons.location_on_outlined),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(
-                              color: Colors.grey,
-                              width: 1.5,
-                            ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() => selectedGender = "Female"),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: selectedGender == "Female"
+                              ? AppColors.mintWhisper
+                              : Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: selectedGender == "Female"
+                                ? AppColors.emeraldGreen
+                                : Colors.grey.shade300,
+                            width: selectedGender == "Female" ? 2 : 1,
                           ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(
-                              color: Colors.grey,
-                              width: 1.5,
-                            ),
-                          ),
-                          hintText: "CITY CHOWK TO CAMPUS",
                         ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          "Female",
+                          style: TextStyle(
+                            color: selectedGender == "Female"
+                                ? Colors.green.shade800
+                                : Colors.black87,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+
+              // DEFAULT ROUTE INPUT
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "DEFAULT ROUTE",
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    TextField(
+                      controller: _defaultRouteController,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.location_on_outlined),
+                        border: InputBorder.none,
+                        hintText: "e.g. City Chowk → Baghdad-ul-Jadeed Campus",
+                        isDense: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 32),
+
+              // SAVE & CONTINUE BUTTON
+              GestureDetector(
+                onTap: isLoading ? null : _saveAndContinue,
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  decoration: BoxDecoration(
+                    color: isLoading
+                        ? AppColors.emeraldGreen.withValues(alpha: 0.6)
+                        : AppColors.emeraldGreen,
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.emeraldGreen.withValues(alpha: 0.3),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
                       ),
                     ],
                   ),
-                ),
-                SizedBox(height: 16),
-                GestureDetector(
-                  onTap: isLoading ? null : _saveAndContinue,
-                  child: Container(
-                    alignment: Alignment.center,
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      vertical: 14,
-                      horizontal: 16,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppColors.emeraldGreen,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.mediumTeal),
-                    ),
+                  child: Center(
                     child: isLoading
                         ? const SizedBox(
                             height: 22,
@@ -491,8 +532,9 @@ class _CompleteProfileState extends State<CompleteProfile> {
                           ),
                   ),
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 20),
+            ],
           ),
         ),
       ),

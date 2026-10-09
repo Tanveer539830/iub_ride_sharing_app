@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../constants/app_colors.dart';
-import '../practice_screen.dart';
+import '../signing_screen.dart';
 class VerifyAccount extends StatefulWidget {
   const VerifyAccount({super.key});
 

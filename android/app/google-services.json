@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "89817940709",
+    "project_id": "iub-ride-sharing-app",
+    "storage_bucket": "iub-ride-sharing-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:89817940709:android:bee136f95c90f4889e0a0c",
+        "android_client_info": {
+          "package_name": "com.example.iub_ride_sharing_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "89817940709-mp5bmshm02sbig87m0rod07vsjagt8c2.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.iub_ride_sharing_app",
+            "certificate_hash": "de6129c6191aece828372d55fe5b3d31693b24a1"
+          }
+        },
+        {
+          "client_id": "89817940709-73rr62uu9r16qdd77hih8bsjd3p6ooek.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCUD3idIqmsrBPCn9EjA1uZ0rgdZPWgfgU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "89817940709-73rr62uu9r16qdd77hih8bsjd3p6ooek.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,8 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:iub_ride_sharing_app/screens/forget_password_screens/verify_account.dart';
-import 'package:iub_ride_sharing_app/screens/practice_screen.dart';
-
 import '../../constants/app_colors.dart';
 
 class ForgetPassword extends StatefulWidget {
@@ -14,6 +11,8 @@ class ForgetPassword extends StatefulWidget {
 
 class _ForgetPasswordState extends State<ForgetPassword> {
   final _emailController = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+  bool _isLoading = false;
 
   @override
   void dispose() {
@@ -21,124 +20,209 @@ class _ForgetPasswordState extends State<ForgetPassword> {
     super.dispose();
   }
 
-  Future<void> _resetPassword() async {
-    final email = _emailController.text.trim();
+  bool _isValidIubEmail(String email) {
+    final clean = email.trim().toLowerCase();
+    return clean.endsWith('@iub.edu.pk') || clean.endsWith('.iub.edu.pk');
+  }
 
-    if (email.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("Please enter your email")));
+  Future<void> _resetPassword() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final email = _emailController.text.trim().toLowerCase();
+
+    if (!_isValidIubEmail(email)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Only @iub.edu.pk university emails are registered."),
+          backgroundColor: Colors.red,
+        ),
+      );
       return;
     }
+
+    setState(() => _isLoading = true);
 
     try {
       await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Password reset email sent!")),
-      );
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            title: const Row(
+              children: [
+                Icon(Icons.mark_email_read_outlined, color: AppColors.emeraldGreen, size: 28),
+                SizedBox(width: 8),
+                Text("Email Sent!"),
+              ],
+            ),
+            content: Text(
+              "A password reset link has been sent to $email. Please check your university inbox (and spam folder) to reset your password.",
+              style: const TextStyle(fontSize: 14),
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(ctx); // Close dialog
+                  Navigator.pop(context); // Go back to sign in
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.emeraldGreen,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+                child: const Text("Back to Sign In"),
+              ),
+            ],
+          ),
+        );
+      }
     } on FirebaseAuthException catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message ?? "Failed to send reset email")),
-      );
+      String message = "Failed to send reset email";
+      if (e.code == 'user-not-found') {
+        message = "No university account found with this email.";
+      } else if (e.code == 'invalid-email') {
+        message = "Please enter a valid university email address.";
+      } else if (e.message != null) {
+        message = e.message!;
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(message),
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("An error occurred: $e"),
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.black87, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 80, 20, 80),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                GestureDetector(
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => SignIn()),
-                    );
-                  },
-                  child: Container(
-                    width: 40,
-                    height: 40,
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Forgot Password",
+                    style: TextStyle(
+                      color: Colors.black87,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
                     ),
-                    child: const Icon(Icons.arrow_back),
                   ),
-                ),
-
-                const SizedBox(height: 20),
-
-                const Text(
-                  "Forget Password",
-                  style: TextStyle(
-                    color: Colors.black,
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
+                  const SizedBox(height: 8),
+                  Text(
+                    "Enter your university email (@iub.edu.pk) and we'll send you a link to reset your password.",
+                    style: TextStyle(fontSize: 14, color: Colors.grey.shade600, height: 1.4),
                   ),
-                ),
+                  const SizedBox(height: 28),
 
-                Text(
-                  "EMAIL",
-                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
-                ),
+                  Text(
+                    "UNIVERSITY EMAIL ADDRESS",
+                    style: TextStyle(
+                      color: Colors.grey.shade700,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
 
-                const SizedBox(height: 6),
+                  TextFormField(
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    validator: (val) {
+                      if (val == null || val.trim().isEmpty) {
+                        return "Please enter your university email address";
+                      }
+                      final clean = val.trim().toLowerCase();
+                      if (!_isValidIubEmail(clean)) {
+                        return "Only @iub.edu.pk university email is allowed";
+                      }
+                      return null;
+                    },
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.school_outlined, size: 20),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: AppColors.emeraldGreen, width: 1.5),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      errorBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.red.shade300),
+                      ),
+                      focusedErrorBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Colors.red, width: 1.5),
+                      ),
+                      hintText: "fa20-bse-001@iub.edu.pk",
+                      hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                    ),
+                  ),
 
-                TextField(
-                  controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: InputDecoration(
-                    prefixIcon: const Icon(Icons.email),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(
-                        color: Colors.grey,
-                        width: 1.5,
+                  const SizedBox(height: 28),
+
+                  ElevatedButton(
+                    onPressed: _isLoading ? null : _resetPassword,
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 52),
+                      backgroundColor: AppColors.emeraldGreen,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(
-                        color: Colors.grey,
-                        width: 1.5,
-                      ),
-                    ),
-                    hintText: "abc@gmail.com",
+                    child: _isLoading
+                        ? const SizedBox(
+                            height: 22,
+                            width: 22,
+                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+                          )
+                        : const Text(
+                            "Send Reset Email",
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                   ),
-                ),
-
-                const SizedBox(height: 24),
-                GestureDetector(
-                  onTap: _resetPassword,
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    decoration: BoxDecoration(
-                      color: AppColors.emeraldGreen,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.mediumTeal),
-                    ),
-
-                    child: const Center(
-                      child: Text(
-                        "Send Reset Email",
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-              ],
+                ],
+              ),
             ),
           ),
         ),
